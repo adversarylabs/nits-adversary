@@ -1,0 +1,9 @@
+node_modules/
+dist/
+!dist/
+!dist/index.js
+!dist/index.d.ts
+.adversary/
+.adversary-train/
+npm-debug.log*
+.DS_Store

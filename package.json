@@ -1,0 +1,18 @@
+{
+  "name": "nits",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@adversarylabs/sdk": "^0.1.16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.7.2"
+  }
+}
