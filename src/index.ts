@@ -13,6 +13,18 @@ const UNFINISHED_RENAME_PAIRS: Array<{ a: RegExp; b: RegExp; label: string }> = 
   { a: /\b\w+_old\b/i, b: /\b\w+_new\b/i, label: "_old/_new dual naming" },
 ];
 
+const RECORDER_NAME = /(?:record|logger|trace|issue|audit|persist)/i;
+const SECRET_MASKER_NAME = /(?:mask|redact|saniti[sz]e|scrub)/i;
+
+interface MaskingGuarantee {
+  recorder: string;
+  sanitizer: string;
+  path: string;
+  line: number;
+  start: number;
+  end: number;
+}
+
 export function createApp(): Adversary {
   const app = new Adversary({
     name: "review/nits",
@@ -131,6 +143,61 @@ export function createApp(): Adversary {
     }
   });
 
+  app.rule("nits.redundant_secret_masking", async (ctx) => {
+    const sources = await ctx.loadInScopeSources({ limit: 150 });
+    const guarantees = sources.flatMap((source) =>
+      findMaskingGuarantees(source.path, source.content || ""),
+    );
+    let emitted = 0;
+
+    for (const source of sources) {
+      if (emitted >= 3) break;
+      if (shouldSkipPath(source.path)) continue;
+      const lines = (source.content || "").split("\n");
+      let offset = 0;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        const guarantee = guarantees.find(
+          (candidate) =>
+            candidate.path === source.path &&
+            !(
+              offset >= candidate.start &&
+              offset < candidate.end
+            ) && containsNestedMaskingCall(line, candidate),
+        );
+        if (guarantee === undefined) {
+          offset += line.length + 1;
+          continue;
+        }
+
+        ctx.finding({
+          ruleId: "nits.redundant_secret_masking",
+          category: "style",
+          severity: Severity.Info,
+          confidence: "medium",
+          title: "Redundant secret masking before recorder",
+          summary: `${guarantee.recorder} already applies ${guarantee.sanitizer} before emitting this value, so masking it at the call site is redundant.`,
+          evidence: [
+            {
+              file: rel(ctx, source.path),
+              line: i + 1,
+              message: line.trim().slice(0, 160),
+            },
+            {
+              file: rel(ctx, guarantee.path),
+              line: guarantee.line,
+              message: `${guarantee.recorder} applies ${guarantee.sanitizer} to its input`,
+            },
+          ],
+          recommendation: `Pass the original value to ${guarantee.recorder} and let its ${guarantee.sanitizer} guarantee own the redaction.`,
+        });
+        emitted++;
+        break;
+      }
+    }
+  });
+
   return app;
 }
 
@@ -156,6 +223,105 @@ function isCommentish(line: string, path: string): boolean {
   }
   if (path.endsWith(".md")) return true;
   return /\/\/.*\b(TODO|FIXME|XXX|HACK)\b/i.test(line);
+}
+
+function findMaskingGuarantees(path: string, content: string): MaskingGuarantee[] {
+  const guarantees: MaskingGuarantee[] = [];
+  const signature = /(?:^|\n)[^\n{};]*?\b([A-Za-z_]\w*)\s*\(([^()\n]*)\)\s*(?:[^\n{]*)\{/g;
+  const controlWords = new Set(["catch", "for", "if", "switch", "while"]);
+
+  for (const match of content.matchAll(signature)) {
+    const recorder = match[1];
+    const parameters = match[2];
+    if (
+      recorder === undefined ||
+      parameters === undefined ||
+      controlWords.has(recorder) ||
+      !RECORDER_NAME.test(recorder)
+    ) {
+      continue;
+    }
+
+    const open = (match.index ?? 0) + match[0].lastIndexOf("{");
+    const end = matchingBrace(content, open);
+    if (end === undefined) continue;
+    const body = content.slice(open + 1, end);
+    const parameterNames = extractParameterNames(parameters, path);
+    const call = /\b(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(([^()\n]*)\)/g;
+
+    for (const sanitizerCall of body.matchAll(call)) {
+      const sanitizer = sanitizerCall[1];
+      const args = sanitizerCall[2];
+      const sanitizerOffset = sanitizerCall.index ?? 0;
+      const sanitizerLine = body.slice(0, sanitizerOffset).split("\n").length;
+      const line = body.split("\n")[sanitizerLine - 1] ?? "";
+      if (
+        sanitizer === undefined ||
+        args === undefined ||
+        !SECRET_MASKER_NAME.test(sanitizer) ||
+        !parameterNames.some((parameter) =>
+          new RegExp(`\\b${escapeRegex(parameter)}\\b`).test(args),
+        ) ||
+        !isTopLevelNestedCall(body, sanitizerOffset, line, sanitizer)
+      ) {
+        continue;
+      }
+      const sourceLine = content.slice(0, open + 1).split("\n").length + sanitizerLine - 1;
+      guarantees.push({ recorder, sanitizer, path, line: sourceLine, start: open, end });
+    }
+  }
+
+  return guarantees;
+}
+
+function isTopLevelNestedCall(
+  body: string,
+  sanitizerOffset: number,
+  line: string,
+  sanitizer: string,
+): boolean {
+  const prefix = body.slice(0, sanitizerOffset);
+  const depth = [...prefix].reduce(
+    (value, character) => value + (character === "{" ? 1 : character === "}" ? -1 : 0),
+    0,
+  );
+  if (depth !== 0) return false;
+
+  const beforeSanitizer = line.slice(0, line.search(new RegExp(`\\b${escapeRegex(sanitizer)}\\b`)));
+  return /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\([^;]*$/.test(beforeSanitizer);
+}
+
+function extractParameterNames(parameters: string, path: string): string[] {
+  return parameters
+    .split(",")
+    .map((parameter) => parameter.trim().split("=")[0]?.trim() ?? "")
+    .map((parameter) => {
+      const beforeType = parameter.split(":")[0]?.trim() ?? "";
+      const identifiers = beforeType.match(/[A-Za-z_]\w*/g) ?? [];
+      if (path.endsWith(".go")) return identifiers[0];
+      return identifiers.at(-1);
+    })
+    .filter((parameter): parameter is string => parameter !== undefined);
+}
+
+function matchingBrace(content: string, open: number): number | undefined {
+  let depth = 0;
+  for (let i = open; i < content.length; i++) {
+    if (content[i] === "{") depth++;
+    if (content[i] === "}") depth--;
+    if (depth === 0) return i + 1;
+  }
+  return undefined;
+}
+
+function containsNestedMaskingCall(line: string, guarantee: MaskingGuarantee): boolean {
+  const recorder = escapeRegex(guarantee.recorder);
+  const sanitizer = escapeRegex(guarantee.sanitizer);
+  return new RegExp(`\\b${recorder}\\s*\\([^;\\n]*\\b${sanitizer}\\s*\\(`).test(line);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const app = createApp();
