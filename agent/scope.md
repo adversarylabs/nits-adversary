@@ -20,6 +20,7 @@ This is **not** a correctness detector, security tool, or staff-level design rev
 - Unfinished renames (old and new names both left behind)
 - Landmine TODOs/FIXMEs introduced without ownership
 - Consistency with surrounding code when the inconsistency is pure taste
+- Redundant cleanup when an in-scope downstream recorder explicitly applies the same operation
 
 ## Out of scope (not a miss for this package)
 
