@@ -198,6 +198,38 @@ export function createApp(): Adversary {
     }
   });
 
+  app.rule("nits.dockerfile_run_indentation", async (ctx) => {
+    const sources = await ctx.loadInScopeSources({
+      include: isDockerfilePath,
+      limit: 100,
+    });
+    let emitted = 0;
+
+    for (const source of sources) {
+      if (emitted >= 3) break;
+      for (const outlier of findDockerfileRunIndentationOutliers(source.content || "")) {
+        ctx.finding({
+          ruleId: "nits.dockerfile_run_indentation",
+          category: "style",
+          severity: Severity.Info,
+          confidence: "medium",
+          title: "Inconsistent Dockerfile RUN indentation",
+          summary: `This line uses ${outlier.actual} leading spaces while the adjacent continuation lines use ${outlier.expected}.`,
+          evidence: [
+            {
+              file: rel(ctx, source.path),
+              line: outlier.line,
+              message: outlier.text.trim().slice(0, 160),
+            },
+          ],
+          recommendation: `Align this continuation line to ${outlier.expected} leading spaces for consistency with the surrounding RUN block.`,
+        });
+        emitted++;
+        break;
+      }
+    }
+  });
+
   return app;
 }
 
@@ -214,6 +246,91 @@ function shouldSkipPath(path: string): boolean {
     p.endsWith(".gitkeep") ||
     p.endsWith("package-lock.json")
   );
+}
+
+interface IndentationOutlier {
+  line: number;
+  actual: number;
+  expected: number;
+  text: string;
+}
+
+function isDockerfilePath(path: string): boolean {
+  const name = path.replace(/\\/g, "/").split("/").at(-1)?.toLowerCase() ?? "";
+  return name === "dockerfile" || name.startsWith("dockerfile.") || name.endsWith(".dockerfile");
+}
+
+function findDockerfileRunIndentationOutliers(content: string): IndentationOutlier[] {
+  const lines = content.split("\n");
+  const outliers: IndentationOutlier[] = [];
+
+  for (let runLine = 0; runLine < lines.length; runLine++) {
+    const first = lines[runLine] ?? "";
+    if (!/^\s*RUN\b/i.test(first) || !hasLineContinuation(first)) continue;
+
+    let end = runLine;
+    while (end + 1 < lines.length && hasLineContinuation(lines[end] ?? "")) end++;
+    if (end - runLine < 3) {
+      runLine = end;
+      continue;
+    }
+
+    const block = lines.slice(runLine, end + 1);
+    if (isStructurallyIndentedRunBlock(block)) {
+      runLine = end;
+      continue;
+    }
+
+    for (let current = runLine + 2; current < end; current++) {
+      const previous = lines[current - 1] ?? "";
+      const line = lines[current] ?? "";
+      const next = lines[current + 1] ?? "";
+      if (
+        previous.trim() === "" ||
+        line.trim() === "" ||
+        next.trim() === "" ||
+        /^\s*#/.test(line) ||
+        /^[ \t]*\t/.test(previous) ||
+        /^[ \t]*\t/.test(line) ||
+        /^[ \t]*\t/.test(next)
+      ) {
+        continue;
+      }
+
+      const expected = leadingSpaces(previous);
+      const actual = leadingSpaces(line);
+      if (
+        expected === 0 ||
+        leadingSpaces(next) !== expected ||
+        Math.abs(actual - expected) !== 1
+      ) {
+        continue;
+      }
+
+      outliers.push({ line: current + 1, actual, expected, text: line });
+    }
+    runLine = end;
+  }
+
+  return outliers;
+}
+
+function hasLineContinuation(line: string): boolean {
+  return /\\\s*$/.test(line);
+}
+
+function leadingSpaces(line: string): number {
+  return line.match(/^ */)?.[0].length ?? 0;
+}
+
+function isStructurallyIndentedRunBlock(lines: string[]): boolean {
+  if (lines.some((line) => line.includes("<<"))) return true;
+
+  return lines.some((line) => {
+    const shell = line.trim().replace(/^(?:&&|\|\|)\s*/, "");
+    return /^(?:if|then|elif|else|fi|for|while|until|case|esac|select|do|done)\b/.test(shell) ||
+      /^[({]/.test(shell);
+  });
 }
 
 function isCommentish(line: string, path: string): boolean {
