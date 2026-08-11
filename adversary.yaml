@@ -4,8 +4,6 @@ description: >
   Non-blocking style and taste nits — naming, stale comments, unfinished renames,
   and similar maintainer cleanup. Not correctness; not a full design review.
 
-uses: []
-
 triggers:
   manual: true
   files_changed:
