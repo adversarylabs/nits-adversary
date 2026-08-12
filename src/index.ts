@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { Adversary, Severity, log } from "@adversarylabs/sdk";
+import { promisify } from "node:util";
+import { Adversary, Severity, log, type RuleContext } from "@adversarylabs/sdk";
+
+const execute = promisify(execFile);
 
 const TODO_LANDMINE =
   /\b(TODO|FIXME|XXX|HACK)\b(?![^\n]{0,80}\b(https?:\/\/|#[0-9]+|[A-Z]+-\d+)\b)/i;
@@ -25,6 +29,13 @@ interface MaskingGuarantee {
   end: number;
 }
 
+interface ScopedSource {
+  path: string;
+  content: string;
+  changedLines: Set<number>;
+  status: "added" | "modified" | "repository";
+}
+
 export function createApp(): Adversary {
   const app = new Adversary({
     name: "review/nits",
@@ -37,7 +48,7 @@ export function createApp(): Adversary {
   });
 
   app.rule("nits.todo_landmine", async (ctx) => {
-    const sources = await ctx.loadInScopeSources({ limit: 150 });
+    const sources = await loadScopedSources(ctx);
     let emitted = 0;
     for (const source of sources) {
       if (emitted >= 3) break;
@@ -46,6 +57,7 @@ export function createApp(): Adversary {
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i] ?? "";
+        if (!isEligibleLine(source, i + 1)) continue;
         if (!isCommentish(line, source.path) && !TODO_LANDMINE.test(line)) continue;
         if (!TODO_LANDMINE.test(line)) continue;
         // Require TODO-like token on a comment or end-of-line note.
@@ -78,12 +90,14 @@ export function createApp(): Adversary {
   });
 
   app.rule("nits.unfinished_rename", async (ctx) => {
-    const sources = await ctx.loadInScopeSources({ limit: 150 });
+    const sources = await loadScopedSources(ctx);
     for (const source of sources) {
       if (shouldSkipPath(source.path)) continue;
       const content = source.content || "";
       for (const pair of UNFINISHED_RENAME_PAIRS) {
         if (pair.a.test(content) && pair.b.test(content)) {
+          const line = firstEligibleMatchLine(source, pair.a) ?? firstEligibleMatchLine(source, pair.b);
+          if (line === undefined) continue;
           log.info(`Unfinished rename pattern in ${source.path}`);
           ctx.finding({
             ruleId: "nits.unfinished_rename",
@@ -95,6 +109,7 @@ export function createApp(): Adversary {
             evidence: [
               {
                 file: rel(ctx, source.path),
+                line,
                 message: pair.label,
               },
             ],
@@ -108,7 +123,7 @@ export function createApp(): Adversary {
   });
 
   app.rule("nits.stale_comment_marker", async (ctx) => {
-    const sources = await ctx.loadInScopeSources({ limit: 150 });
+    const sources = await loadScopedSources(ctx);
     const stale =
       /\b(this (is|was) (no longer|not) used|obsolete|remove this later|temporary hack)\b/i;
     let emitted = 0;
@@ -118,6 +133,7 @@ export function createApp(): Adversary {
       const lines = (source.content || "").split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i] ?? "";
+        if (!isEligibleLine(source, i + 1)) continue;
         if (!isCommentish(line, source.path)) continue;
         if (!stale.test(line)) continue;
         ctx.finding({
@@ -144,7 +160,7 @@ export function createApp(): Adversary {
   });
 
   app.rule("nits.redundant_secret_masking", async (ctx) => {
-    const sources = await ctx.loadInScopeSources({ limit: 150 });
+    const sources = await loadScopedSources(ctx);
     const guarantees = sources.flatMap((source) =>
       findMaskingGuarantees(source.path, source.content || ""),
     );
@@ -167,6 +183,13 @@ export function createApp(): Adversary {
             ) && containsNestedMaskingCall(line, candidate),
         );
         if (guarantee === undefined) {
+          offset += line.length + 1;
+          continue;
+        }
+        if (
+          !isEligibleLine(source, i + 1) &&
+          !isEligibleLine(source, guarantee.line)
+        ) {
           offset += line.length + 1;
           continue;
         }
@@ -199,7 +222,8 @@ export function createApp(): Adversary {
   });
 
   app.rule("nits.dockerfile_run_indentation", async (ctx) => {
-    const sources = await ctx.loadInScopeSources({
+    const sources = await loadScopedSources(ctx, {
+      cacheKey: "dockerfiles",
       include: isDockerfilePath,
       limit: 100,
     });
@@ -208,6 +232,7 @@ export function createApp(): Adversary {
     for (const source of sources) {
       if (emitted >= 3) break;
       for (const outlier of findDockerfileRunIndentationOutliers(source.content || "")) {
+        if (!isEligibleLine(source, outlier.line)) continue;
         ctx.finding({
           ruleId: "nits.dockerfile_run_indentation",
           category: "style",
@@ -231,6 +256,114 @@ export function createApp(): Adversary {
   });
 
   return app;
+}
+
+interface ScopedLoadOptions {
+  cacheKey?: string;
+  include?: (path: string) => boolean;
+  limit?: number;
+}
+
+async function loadScopedSources(
+  ctx: RuleContext,
+  options: ScopedLoadOptions = {},
+): Promise<ScopedSource[]> {
+  const key = `nits.changed-line-sources:${options.cacheKey ?? "all"}`;
+  const cached = ctx.cache.get(key);
+  if (cached !== undefined) return cached as ScopedSource[];
+
+  const loaded = await ctx.loadInScopeSources({
+    include: options.include,
+    limit: options.limit ?? 150,
+  });
+  const wholeTarget = ctx.change === null || ctx.change.scanMode === "all";
+  const sources: ScopedSource[] = [];
+  for (const source of loaded) {
+    if (wholeTarget || source.status === "repository") {
+      sources.push({
+        path: source.path,
+        content: source.content,
+        changedLines: new Set<number>(),
+        status: "repository",
+      });
+      continue;
+    }
+
+    const change = await changedSource(ctx, source.path);
+    sources.push({
+      path: source.path,
+      content: source.content,
+      changedLines: change.changedLines,
+      status: change.status,
+    });
+  }
+  ctx.cache.set(key, sources);
+  return sources;
+}
+
+function isEligibleLine(source: ScopedSource, line: number): boolean {
+  return (
+    source.status === "repository" ||
+    source.status === "added" ||
+    source.changedLines.has(line)
+  );
+}
+
+function firstEligibleMatchLine(source: ScopedSource, expression: RegExp): number | undefined {
+  const flags = expression.flags.includes("g") ? expression.flags : `${expression.flags}g`;
+  const pattern = new RegExp(expression.source, flags);
+  for (const match of source.content.matchAll(pattern)) {
+    if (match.index === undefined) continue;
+    const line = source.content.slice(0, match.index).split(/\r?\n/).length;
+    if (isEligibleLine(source, line)) return line;
+  }
+  return undefined;
+}
+
+async function changedSource(
+  ctx: RuleContext,
+  path: string,
+): Promise<Pick<ScopedSource, "changedLines" | "status">> {
+  const base = ctx.change?.baseRef;
+  if (base === undefined || !(await existsAtRevision(ctx.repoPath, base, path))) {
+    return { changedLines: new Set<number>(), status: "added" };
+  }
+
+  const args = ["diff", "--unified=0", base];
+  const head = ctx.change?.headRef;
+  if (head !== undefined && !ctx.change?.worktree) args.push(head);
+  args.push("--", path);
+  const patch = await gitOutput(ctx.repoPath, args);
+  return { changedLines: changedLineNumbers(patch), status: "modified" };
+}
+
+async function existsAtRevision(repoPath: string, revision: string, path: string): Promise<boolean> {
+  try {
+    await execute("git", ["-C", repoPath, "cat-file", "-e", `${revision}:${path}`], {
+      maxBuffer: 1024 * 1024,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function gitOutput(repoPath: string, args: string[]): Promise<string> {
+  const result = await execute("git", ["-C", repoPath, ...args], {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return result.stdout;
+}
+
+function changedLineNumbers(patch: string): Set<number> {
+  const lines = new Set<number>();
+  for (const match of patch.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const start = Number(match[1]);
+    const count = match[2] === undefined ? 1 : Number(match[2]);
+    for (let line = start; line < start + count; line += 1) lines.add(line);
+  }
+  return lines;
 }
 
 function rel(ctx: { relpath?: (p: string) => string }, path: string): string {
