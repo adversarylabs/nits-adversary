@@ -39,6 +39,7 @@ interface ScopedSource {
 export function createApp(): Adversary {
   const app = new Adversary({
     name: "review/nits",
+    version: "0.0.5",
     // Nits are intentionally Severity.Info; surface them rather than drop as noise.
     review: {
       maximumFindings: 8,
