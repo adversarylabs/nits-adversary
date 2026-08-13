@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { rm } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 
 await rm("dist", { recursive: true, force: true });
 
@@ -14,3 +14,9 @@ await build({
     js: "import { createRequire as __nitsCreateRequire } from 'node:module'; const require = __nitsCreateRequire(import.meta.url);",
   },
 });
+
+await mkdir("schemas", { recursive: true });
+await copyFile(
+  "node_modules/@adversarylabs/sdk/schemas/adversary.review.v1.schema.json",
+  "schemas/adversary.review.v1.schema.json",
+);

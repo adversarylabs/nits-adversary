@@ -17073,7 +17073,7 @@ var SECRET_MASKER_NAME = /(?:mask|redact|saniti[sz]e|scrub)/i;
 function createApp() {
   const app2 = new Adversary({
     name: "review/nits",
-    version: "0.0.5",
+    version: "0.0.6",
     // Nits are intentionally Severity.Info; surface them rather than drop as noise.
     review: {
       maximumFindings: 8,

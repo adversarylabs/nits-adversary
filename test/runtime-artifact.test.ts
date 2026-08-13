@@ -12,7 +12,12 @@ test("bundled runtime executes without node_modules and reports its release vers
   const target = await mkdtemp(join(tmpdir(), "nits-target-"));
   const entrypoint = join(artifact, "dist", "index.js");
   await mkdir(dirname(entrypoint), { recursive: true });
+  await mkdir(join(artifact, "schemas"), { recursive: true });
   await copyFile(join(projectRoot, "dist", "index.js"), entrypoint);
+  await copyFile(
+    join(projectRoot, "schemas", "adversary.review.v1.schema.json"),
+    join(artifact, "schemas", "adversary.review.v1.schema.json"),
+  );
   await writeFile(join(artifact, "package.json"), '{"type":"module"}\n');
   await writeFile(join(target, "clean.ts"), "export const ready = true;\n");
 
@@ -30,6 +35,6 @@ test("bundled runtime executes without node_modules and reports its release vers
   });
 
   assert.equal(result.adversary.name, "review/nits");
-  assert.equal(result.adversary.version, "0.0.5");
+  assert.equal(result.adversary.version, "0.0.6");
   assert.deepEqual(result.findings, []);
 });
