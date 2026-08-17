@@ -1,29 +1,21 @@
-# review/nits
+# Nits adversary
 
-Non-blocking **style / taste** nits for code review: unfinished renames, TODO
-landmines, redundant cleanup, inconsistent Dockerfile continuation indentation,
-and comments that admit temporary/obsolete state.
+Non-blocking style and taste nits — naming, stale comments, unfinished renames, and similar maintainer cleanup. Not correctness; not a full design review.
 
-Not a correctness or design adversary. Compose into personas (e.g. torvalds)
-for depth of “nit:” class gold; surface wording can still use the persona voice.
+## Goals
 
-## Run
-
-```sh
-npm ci && npm test && npm run build
-adversary run . --path /path/to/repo
-```
-
-## Rules
-
-| Rule | Class |
-|------|--------|
-| `nits.todo_landmine` | TODO/FIXME/HACK without ticket/URL |
-| `nits.unfinished_rename` | Dual old/new naming left in one file |
-| `nits.stale_comment_marker` | Comments admitting temporary/obsolete code |
-| `nits.redundant_secret_masking` | Duplicate masking before a recorder with the same guarantee |
-| `nits.dockerfile_run_indentation` | Isolated one-space outlier in a flat continued `RUN` block |
+The adversary is designed to produce a small number of high-confidence,
+actionable findings grounded in concrete repository evidence. Its review should
+be deterministic where possible, explicit about impact, and quiet when the
+available evidence does not justify a finding.
 
 ## Scope
 
-See `agent/scope.md`.
+It evaluates changed lines for non-blocking maintainer cleanup such as stale comments, unfinished renames, redundant masking, indentation outliers, and unactionable TODO markers.
+
+The complete detector or review inventory is maintained in
+[CHECKS.md](CHECKS.md).
+
+## Boundaries
+
+It reports non-blocking taste only. Correctness, security, architecture, and domain-specific defects belong to specialist adversaries.
