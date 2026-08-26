@@ -11,7 +11,7 @@ available evidence does not justify a finding.
 
 ## Scope
 
-It evaluates changed lines for non-blocking maintainer cleanup such as stale comments, unfinished renames, redundant masking, indentation outliers, and unactionable TODO markers.
+It evaluates changed lines for non-blocking maintainer cleanup such as stale comments, unfinished renames, redundant masking, indentation outliers, unactionable TODO markers, and error names that contradict strongly established local operation vocabulary.
 
 The complete detector or review inventory is maintained in
 [CHECKS.md](CHECKS.md).
@@ -19,3 +19,5 @@ The complete detector or review inventory is maintained in
 ## Boundaries
 
 It reports non-blocking taste only. Correctness, security, architecture, and domain-specific defects belong to specialist adversaries.
+
+The error-domain check is deliberately narrow: it requires a changed error construction, an error-mapping boundary, a nearby diagnostic, and a second same-scope operation signal that agree on a different domain. Generic/shared errors, compatibility aliases, uncertain abbreviations, legacy code, tests, generated code, and weak one-clue matches remain quiet.

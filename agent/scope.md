@@ -20,6 +20,7 @@ This is **not** a correctness detector, security tool, or staff-level design rev
 - Unfinished renames (old and new names both left behind)
 - Landmine TODOs/FIXMEs introduced without ownership
 - Consistency with surrounding code when the inconsistency is pure taste
+- Changed error names that contradict two independent, same-scope operation-domain signals
 - Redundant cleanup when an in-scope downstream recorder explicitly applies the same operation
 
 ## Out of scope (not a miss for this package)
@@ -29,6 +30,7 @@ This is **not** a correctness detector, security tool, or staff-level design rev
 - “This whole stack is wrong” persona posture → persona packages (e.g. torvalds)
 - CI / packaging / framework-specific idioms → domain packages
 - Pure format-only diffs with no human-style judgment (optional ignore)
+- Error-domain guesses based only on abbreviations, a single clue, tests/generated code, or unchanged legacy code
 
 ## Factory grading rule
 
