@@ -17070,10 +17070,112 @@ var UNFINISHED_RENAME_PAIRS = [
 ];
 var RECORDER_NAME = /(?:record|logger|trace|issue|audit|persist)/i;
 var SECRET_MASKER_NAME = /(?:mask|redact|saniti[sz]e|scrub)/i;
+var OPERATION_NAME = /\b(?:[A-Za-z_]\w*(?:::[A-Za-z_]\w*|\.[A-Za-z_]\w*)*[_A-Z]?)?(?:create|open|read|write|load|save|delete|remove|parse|decode|encode|connect|send|receive|fetch|store|update|mount|setup|configure|validate|publish|render|compile|copy|move|rename|lock|unlock)[A-Za-z0-9_]*(?:!\s*)?\(/i;
+var DIAGNOSTIC_CALL = /\b(?:tracing::)?(?:log|logger|trace|debug|info|warn|warning|error|fatal|printf|println|eprintln)(?:!|\.[A-Za-z_]\w*)?\s*\(/i;
+var COMPATIBILITY_MARKER = /\b(?:alias|backward(?:s)?[-_ ]compat|compatibility|deprecated|legacy|normalize[ds]?|translate[ds]?|interoperab|wire[-_ ]format)\b/i;
+var DOMAIN_STOP_WORDS = /* @__PURE__ */ new Set([
+  "all",
+  "and",
+  "any",
+  "app",
+  "application",
+  "argument",
+  "async",
+  "attempt",
+  "bad",
+  "call",
+  "cause",
+  "close",
+  "closed",
+  "code",
+  "config",
+  "configuration",
+  "construct",
+  "create",
+  "created",
+  "creating",
+  "data",
+  "delete",
+  "deleted",
+  "deleting",
+  "directory",
+  "dir",
+  "do",
+  "done",
+  "error",
+  "exception",
+  "failed",
+  "failure",
+  "fatal",
+  "file",
+  "from",
+  "event",
+  "generic",
+  "get",
+  "got",
+  "group",
+  "handle",
+  "handler",
+  "id",
+  "input",
+  "internal",
+  "invalid",
+  "io",
+  "load",
+  "loaded",
+  "loading",
+  "map",
+  "message",
+  "missing",
+  "new",
+  "not",
+  "open",
+  "opened",
+  "object",
+  "opening",
+  "operation",
+  "output",
+  "path",
+  "persist",
+  "persistence",
+  "read",
+  "reading",
+  "record",
+  "remove",
+  "removed",
+  "request",
+  "resource",
+  "response",
+  "result",
+  "return",
+  "save",
+  "saved",
+  "service",
+  "set",
+  "shared",
+  "state",
+  "status",
+  "subdirectory",
+  "task",
+  "the",
+  "this",
+  "to",
+  "unable",
+  "unavailable",
+  "unexpected",
+  "unknown",
+  "update",
+  "updated",
+  "value",
+  "variant",
+  "with",
+  "write",
+  "writing"
+]);
 function createApp() {
   const app2 = new Adversary({
     name: "review/nits",
-    version: "0.0.6",
+    version: "0.0.8",
     // Nits are intentionally Severity.Info; surface them rather than drop as noise.
     review: {
       maximumFindings: 8,
@@ -17266,6 +17368,36 @@ function createApp() {
       }
     }
   });
+  app2.rule("nits.error_domain_mismatch", async (ctx) => {
+    const sources = await loadScopedSources(ctx, {
+      cacheKey: "error-domain-mismatch",
+      include: isReviewableImplementationPath,
+      limit: 150
+    });
+    let emitted = 0;
+    for (const source of sources) {
+      if (emitted >= 3) break;
+      if (source.status === "repository" || shouldSkipErrorDomainPath(source.path)) continue;
+      for (const mismatch of findErrorDomainMismatches(source)) {
+        ctx.finding({
+          ruleId: "nits.error_domain_mismatch",
+          category: "style",
+          severity: Severity.Info,
+          confidence: "medium",
+          title: "Error name contradicts the operation domain",
+          summary: `The changed ${mismatch.errorName} error names the ${mismatch.errorDomain} domain, while the surrounding operation and diagnostic consistently describe ${mismatch.operationDomain}.`,
+          evidence: mismatch.evidence.map((evidence) => ({
+            file: rel(ctx, source.path),
+            line: evidence.line,
+            message: evidence.message
+          })),
+          recommendation: `Use an error variant for ${mismatch.operationDomain}, or a deliberately generic error name shared by both domains.`
+        });
+        emitted++;
+        break;
+      }
+    }
+  });
   return app2;
 }
 async function loadScopedSources(ctx, options = {}) {
@@ -17283,6 +17415,7 @@ async function loadScopedSources(ctx, options = {}) {
       sources.push({
         path: source.path,
         content: source.content,
+        previousContent: void 0,
         changedLines: /* @__PURE__ */ new Set(),
         status: "repository"
       });
@@ -17292,6 +17425,7 @@ async function loadScopedSources(ctx, options = {}) {
     sources.push({
       path: source.path,
       content: source.content,
+      previousContent: change.previousContent,
       changedLines: change.changedLines,
       status: change.status
     });
@@ -17315,14 +17449,15 @@ function firstEligibleMatchLine(source, expression) {
 async function changedSource(ctx, path) {
   const base = ctx.change?.baseRef;
   if (base === void 0 || !await existsAtRevision(ctx.repoPath, base, path)) {
-    return { changedLines: /* @__PURE__ */ new Set(), status: "added" };
+    return { changedLines: /* @__PURE__ */ new Set(), status: "added", previousContent: void 0 };
   }
   const args = ["diff", "--unified=0", base];
   const head = ctx.change?.headRef;
   if (head !== void 0 && !ctx.change?.worktree) args.push(head);
   args.push("--", path);
   const patch = await gitOutput(ctx.repoPath, args);
-  return { changedLines: changedLineNumbers(patch), status: "modified" };
+  const previousContent = await gitOutput(ctx.repoPath, ["show", `${base}:${path}`]);
+  return { changedLines: changedLineNumbers(patch), status: "modified", previousContent };
 }
 async function existsAtRevision(repoPath, revision, path) {
   try {
@@ -17349,6 +17484,278 @@ function changedLineNumbers(patch) {
     for (let line = start; line < start + count; line += 1) lines.add(line);
   }
   return lines;
+}
+function findErrorDomainMismatches(source) {
+  const lines = source.content.split(/\r?\n/);
+  const mismatches = [];
+  for (let index = 0; index < lines.length; index++) {
+    const lineNumber = index + 1;
+    if (!source.changedLines.has(lineNumber) && source.status !== "added") continue;
+    const line = lines[index] ?? "";
+    const construction = errorConstructionAt(line);
+    if (construction === void 0) continue;
+    const scope = enclosingFunctionScope(lines, index);
+    if (scope === void 0) continue;
+    if (source.status === "modified" && source.previousContent !== void 0 && previousScopeContainsConstruction(source.previousContent, scope.name, line)) {
+      continue;
+    }
+    const localStart = Math.max(scope.start, index - 7);
+    const localEnd = Math.min(scope.end, index + 3);
+    const localText = lines.slice(localStart, localEnd + 1).join("\n");
+    if (COMPATIBILITY_MARKER.test(localText)) continue;
+    const operation = nearestOperationSignal(lines, scope, index);
+    const diagnostic = nearestDiagnosticSignal(lines, scope, index);
+    const scopeSignal = domainSignal("scope", scope.start, scope.name, scope.name);
+    if (diagnostic === void 0 || operation === void 0 || !hasErrorMappingRelationship(lines, scope.start, operation.line - 1, index)) {
+      continue;
+    }
+    const supporting = [operation, scopeSignal].filter(
+      (signal) => signal !== void 0
+    );
+    const operationDomain = [...diagnostic.tokens].filter((token) => supporting.some((signal) => signal.tokens.has(token))).sort((left, right) => right.length - left.length || left.localeCompare(right))[0];
+    if (operationDomain === void 0) continue;
+    if (operation.tokens.size > 0 && !operation.tokens.has(operationDomain)) continue;
+    const contextTokens = new Set(
+      [diagnostic, ...supporting].flatMap((signal) => [...signal.tokens])
+    );
+    const errorDomain = [...construction.tokens].filter((token) => token !== operationDomain && !contextTokens.has(token)).sort((left, right) => right.length - left.length || left.localeCompare(right))[0];
+    if (errorDomain === void 0) continue;
+    const operationEvidence = supporting.find((signal) => signal.tokens.has(operationDomain));
+    if (operationEvidence === void 0) continue;
+    mismatches.push({
+      errorName: construction.name,
+      errorDomain,
+      operationDomain,
+      evidence: uniqueEvidence([
+        { line: lineNumber, message: line.trim().slice(0, 180) },
+        { line: operationEvidence.line, message: operationEvidence.message.slice(0, 180) },
+        { line: diagnostic.line, message: diagnostic.message.slice(0, 180) }
+      ])
+    });
+  }
+  return mismatches;
+}
+function errorConstructionAt(line) {
+  const code = codeWithoutTrailingComment(line);
+  if (code.trim() === "") return void 0;
+  const syntax = maskStringLiterals(code);
+  const qualified = syntax.match(
+    /\b([A-Z][A-Za-z0-9_]*(?:Error|Exception))(?:::|\.)([A-Z][A-Za-z0-9_]*)\s*\(/
+  );
+  if (qualified?.[2] !== void 0) {
+    const name = `${qualified[1]}::${qualified[2]}`;
+    return { name, tokens: domainTokens(qualified[2]) };
+  }
+  const constructed = syntax.match(/\b(?:new|raise)\s+([A-Z][A-Za-z0-9_]*(?:Error|Exception))\s*\(/);
+  if (constructed?.[1] !== void 0) {
+    const message = stringLiterals(code).join(" ");
+    const tokens = domainTokens(message === "" ? constructed[1] : message);
+    return { name: constructed[1], tokens };
+  }
+  const functional = syntax.match(
+    /\b((?:fmt\.)?Errorf|errors?\.New|anyhow|bail|eyre)\s*!?\s*\(/
+  );
+  if (functional?.[1] !== void 0) {
+    const message = stringLiterals(code).join(" ");
+    if (message === "") return void 0;
+    return { name: functional[1], tokens: domainTokens(message) };
+  }
+  return void 0;
+}
+function maskStringLiterals(code) {
+  let result = "";
+  let quote;
+  let escaped = false;
+  for (const character of code) {
+    if (quote !== void 0) {
+      result += " ";
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = void 0;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      result += " ";
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+function previousScopeContainsConstruction(previousContent, scopeName, currentLine) {
+  const semanticLine = codeWithoutTrailingComment(currentLine).trim();
+  if (semanticLine === "") return true;
+  const previousLines = previousContent.split(/\r?\n/);
+  for (let index = 0; index < previousLines.length; index++) {
+    const signature = functionNameAt(previousLines[index] ?? "");
+    if (signature?.name !== scopeName) continue;
+    const scope = enclosingFunctionScope(previousLines, index);
+    if (scope === void 0 || scope.start !== index) continue;
+    if (previousLines.slice(scope.start, scope.end + 1).some((line) => codeWithoutTrailingComment(line).trim() === semanticLine)) {
+      return true;
+    }
+  }
+  return false;
+}
+function nearestOperationSignal(lines, scope, candidate) {
+  for (let index = candidate - 1; index >= Math.max(scope.start, candidate - 6); index--) {
+    const line = codeWithoutTrailingComment(lines[index] ?? "");
+    if (DIAGNOSTIC_CALL.test(line) || errorConstructionAt(line) !== void 0) continue;
+    if (!OPERATION_NAME.test(line)) continue;
+    const identifiers = line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, " ");
+    const signal = domainSignal("operation", index, line.trim(), identifiers);
+    return signal;
+  }
+  return void 0;
+}
+function hasErrorMappingRelationship(lines, scopeStart, operation, candidate) {
+  if (operation >= candidate) return false;
+  const relationship = lines.slice(Math.max(scopeStart, operation), candidate + 1).map(codeWithoutTrailingComment).join("\n");
+  return /\b(?:map_err|inspect_err|or_else|catch|except|rescue|recover)\b/.test(relationship) || /\b(?:if|unless)\b[^\n{:]*(?:err|error|exception|cause)\b[^\n]*[{:]?/i.test(
+    relationship
+  );
+}
+function nearestDiagnosticSignal(lines, scope, candidate) {
+  const candidates = [];
+  for (let index = Math.max(scope.start, candidate - 3); index <= Math.min(scope.end, candidate + 2); index++) {
+    if (index === candidate) continue;
+    const line = codeWithoutTrailingComment(lines[index] ?? "");
+    if (!DIAGNOSTIC_CALL.test(line)) continue;
+    const message = stringLiterals(line).join(" ");
+    if (message === "") continue;
+    const signal = domainSignal("diagnostic", index, line.trim(), message);
+    if (signal.tokens.size > 0) candidates.push(signal);
+  }
+  return candidates.sort(
+    (left, right) => Math.abs(left.line - candidate) - Math.abs(right.line - candidate)
+  )[0];
+}
+function domainSignal(kind, zeroBasedLine, message, tokenSource) {
+  return { kind, line: zeroBasedLine + 1, message, tokens: domainTokens(tokenSource) };
+}
+function domainTokens(value) {
+  const words = value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").toLowerCase().match(/[a-z][a-z0-9]*/g) ?? [];
+  return new Set(
+    words.map((word) => singularDomainWord(word)).filter((word) => word.length >= 4 && !DOMAIN_STOP_WORDS.has(word))
+  );
+}
+function singularDomainWord(word) {
+  if (word.length > 5 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 5 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+function stringLiterals(code) {
+  const values = [];
+  for (const match of code.matchAll(/(["'`])((?:\\.|(?!\1).)*)\1/g)) {
+    if (match[2] !== void 0) values.push(match[2].replace(/\\[nrt]/g, " "));
+  }
+  return values;
+}
+function codeWithoutTrailingComment(line) {
+  let quote;
+  let escaped = false;
+  for (let index = 0; index < line.length - 1; index++) {
+    const character = line[index];
+    if (quote !== void 0) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = void 0;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "/" && line[index + 1] === "/") return line.slice(0, index);
+    if (character === "#" && (index === 0 || /\s/.test(line[index - 1] ?? ""))) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+function enclosingFunctionScope(lines, candidate) {
+  for (let start = candidate; start >= Math.max(0, candidate - 80); start--) {
+    const signature = functionNameAt(lines[start] ?? "");
+    if (signature === void 0) continue;
+    if (signature.python) {
+      const indentation = (lines[start] ?? "").match(/^\s*/)?.[0].length ?? 0;
+      let end2 = lines.length - 1;
+      for (let index = start + 1; index < lines.length; index++) {
+        const line = lines[index] ?? "";
+        if (line.trim() === "") continue;
+        const current = line.match(/^\s*/)?.[0].length ?? 0;
+        if (current <= indentation) {
+          end2 = index - 1;
+          break;
+        }
+      }
+      if (candidate <= end2) return { start, end: end2, name: signature.name };
+      continue;
+    }
+    const end = bracedScopeEnd(lines, start);
+    if (end !== void 0 && candidate <= end) return { start, end, name: signature.name };
+  }
+  return void 0;
+}
+function functionNameAt(line) {
+  const code = codeWithoutTrailingComment(line);
+  const rust = code.match(/\bfn\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(/);
+  if (rust?.[1] !== void 0) return { name: rust[1], python: false };
+  const go = code.match(/\bfunc\s*(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/);
+  if (go?.[1] !== void 0) return { name: go[1], python: false };
+  const named = code.match(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/);
+  if (named?.[1] !== void 0) return { name: named[1], python: false };
+  const python = code.match(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/);
+  if (python?.[1] !== void 0) return { name: python[1], python: true };
+  const method = code.match(
+    /^\s*(?:pub(?:\([^)]*\))?\s+|private\s+|protected\s+|public\s+|static\s+|async\s+)*(?:[A-Za-z_$][\w$<>:[\],.?&* ]+\s+)?([A-Za-z_$][\w$]*)\s*\([^;]*\)\s*(?:[^;{]*)\{/
+  );
+  if (method?.[1] !== void 0 && !/^(?:if|for|while|switch|catch|match)$/.test(method[1])) {
+    return { name: method[1], python: false };
+  }
+  return void 0;
+}
+function bracedScopeEnd(lines, start) {
+  let depth = 0;
+  let opened = false;
+  for (let index = start; index < lines.length; index++) {
+    const code = codeWithoutTrailingComment(lines[index] ?? "").replace(
+      /(["'`])(?:\\.|(?!\1).)*\1/g,
+      ""
+    );
+    for (const character of code) {
+      if (character === "{") {
+        depth++;
+        opened = true;
+      } else if (character === "}" && opened) {
+        depth--;
+        if (depth === 0) return index;
+      }
+    }
+    if (!opened && index > start + 5) return void 0;
+  }
+  return void 0;
+}
+function uniqueEvidence(evidence) {
+  const seen = /* @__PURE__ */ new Set();
+  return evidence.filter((item) => {
+    if (seen.has(item.line)) return false;
+    seen.add(item.line);
+    return true;
+  });
+}
+function isReviewableImplementationPath(path) {
+  const normalized = path.replace(/\\/g, "/").toLowerCase();
+  return /\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|kts|m|mm|php|py|rb|rs|swift|ts|tsx)$/.test(
+    normalized
+  );
+}
+function shouldSkipErrorDomainPath(path) {
+  const normalized = `/${path.replace(/\\/g, "/").toLowerCase()}`;
+  return shouldSkipPath(path) || /\/(?:fixtures?|testdata|tests?|__tests__|spec|specs|vendor|vendors|generated|gen|mocks?|snapshots?)\//.test(
+    normalized
+  ) || /(?:^|\/)(?:generated|mock)[^/]*\.[^/]+$/.test(normalized) || /(?:_test\.go|\.(?:test|spec)\.[cm]?[jt]sx?)$/.test(normalized);
 }
 function rel(ctx, path) {
   return ctx.relpath ? ctx.relpath(path) : path;

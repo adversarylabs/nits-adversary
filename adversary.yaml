@@ -1,5 +1,5 @@
 name: review/nits
-version: 0.0.7
+version: 0.0.8
 description: >
   Non-blocking style and taste nits — naming, stale comments, unfinished renames,
   and similar maintainer cleanup. Not correctness; not a full design review.
