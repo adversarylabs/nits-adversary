@@ -1,4 +1,4 @@
-name: review/nits
+name: adversarylabs/review/nits
 version: 0.0.8
 description: >
   Non-blocking style and taste nits — naming, stale comments, unfinished renames,
