@@ -105,7 +105,7 @@ test("the tracked bundled runtime executes without node_modules and reports its 
   });
 
   assert.equal(result.adversary.name, "review/nits");
-  assert.equal(result.adversary.version, "0.0.8");
+  assert.equal(result.adversary.version, "0.0.9");
   assert.equal(
     result.findings.filter((finding) => finding.ruleId === "nits.error_domain_mismatch").length,
     1,
