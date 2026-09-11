@@ -17398,7 +17398,57 @@ function createApp() {
       }
     }
   });
+  app2.rule("nits.diagnostic_operation_mismatch", async (ctx) => {
+    const sources = await loadScopedSources(ctx, {
+      cacheKey: "diagnostic-operation-mismatch",
+      include: isReviewableImplementationPath,
+      limit: 150
+    });
+    let emitted = 0;
+    for (const source of sources) {
+      if (emitted >= 3) break;
+      const operation = operationFromPath(source.path);
+      if (operation === void 0 || shouldSkipErrorDomainPath(source.path)) continue;
+      const lines = source.content.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index] ?? "";
+        if (!isEligibleLine(source, index + 1) || !DIAGNOSTIC_CALL.test(line)) continue;
+        const mismatch = conflictingDiagnosticOperation(line, operation);
+        if (mismatch === void 0) continue;
+        ctx.finding({
+          ruleId: "nits.diagnostic_operation_mismatch",
+          category: "style",
+          severity: Severity.Info,
+          confidence: "medium",
+          title: "Diagnostic names the wrong operation",
+          summary: `This ${operation} handler's changed diagnostic says ${mismatch}, which sends operators toward a different workflow.`,
+          evidence: [{
+            file: rel(ctx, source.path),
+            line: index + 1,
+            message: line.trim().slice(0, 160)
+          }],
+          recommendation: `Describe the ${operation} operation or the immediate verification step in this diagnostic.`
+        });
+        emitted += 1;
+        break;
+      }
+    }
+  });
   return app2;
+}
+var PATH_OPERATIONS = ["create", "enable", "disable", "delete", "remove", "update", "login", "logout"];
+function operationFromPath(path) {
+  const segments = path.toLowerCase().replace(/\.[^.\/]+$/, "").split(/[\/_-]+/);
+  return PATH_OPERATIONS.find((operation) => segments.includes(operation));
+}
+function conflictingDiagnosticOperation(line, operation) {
+  const lower = line.toLowerCase();
+  const actionPhrase = lower.match(
+    /(?:cannot|can't|unable\s+to|failed\s+to|failure\s+(?:to|while|during)|error\s+(?:while|during))\s+(?:proceed\s+with\s+)?([^.;,)]+)/
+  )?.[1];
+  if (actionPhrase === void 0) return void 0;
+  const primary = PATH_OPERATIONS.find((candidate) => new RegExp(`\\b${candidate}(?:ing|d|s)?\\b`).test(actionPhrase));
+  return primary !== void 0 && primary !== operation ? primary : void 0;
 }
 async function loadScopedSources(ctx, options = {}) {
   const key = `nits.changed-line-sources:${options.cacheKey ?? "all"}`;
