@@ -378,11 +378,13 @@ function operationFromPath(path: string): string | undefined {
 
 function conflictingDiagnosticOperation(line: string, operation: string): string | undefined {
   const lower = line.toLowerCase();
-  const mentioned = PATH_OPERATIONS.find((candidate) => candidate !== operation &&
-    new RegExp(`\\b${candidate}(?:ing|d|s)?\\b`).test(lower));
-  if (mentioned === undefined) return undefined;
-  if (!/(?:cannot|can't|unable|failed|failure|error|missing|invalid)/i.test(line)) return undefined;
-  return mentioned;
+  const actionPhrase = lower.match(
+    /(?:cannot|can't|unable\s+to|failed\s+to|failure\s+(?:to|while|during)|error\s+(?:while|during))\s+(?:proceed\s+with\s+)?([^.;,)]+)/,
+  )?.[1];
+  if (actionPhrase === undefined) return undefined;
+  const primary = PATH_OPERATIONS.find((candidate) =>
+    new RegExp(`\\b${candidate}(?:ing|d|s)?\\b`).test(actionPhrase));
+  return primary !== undefined && primary !== operation ? primary : undefined;
 }
 
 interface ScopedLoadOptions {

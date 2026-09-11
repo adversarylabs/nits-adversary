@@ -17443,10 +17443,12 @@ function operationFromPath(path) {
 }
 function conflictingDiagnosticOperation(line, operation) {
   const lower = line.toLowerCase();
-  const mentioned = PATH_OPERATIONS.find((candidate) => candidate !== operation && new RegExp(`\\b${candidate}(?:ing|d|s)?\\b`).test(lower));
-  if (mentioned === void 0) return void 0;
-  if (!/(?:cannot|can't|unable|failed|failure|error|missing|invalid)/i.test(line)) return void 0;
-  return mentioned;
+  const actionPhrase = lower.match(
+    /(?:cannot|can't|unable\s+to|failed\s+to|failure\s+(?:to|while|during)|error\s+(?:while|during))\s+(?:proceed\s+with\s+)?([^.;,)]+)/
+  )?.[1];
+  if (actionPhrase === void 0) return void 0;
+  const primary = PATH_OPERATIONS.find((candidate) => new RegExp(`\\b${candidate}(?:ing|d|s)?\\b`).test(actionPhrase));
+  return primary !== void 0 && primary !== operation ? primary : void 0;
 }
 async function loadScopedSources(ctx, options = {}) {
   const key = `nits.changed-line-sources:${options.cacheKey ?? "all"}`;

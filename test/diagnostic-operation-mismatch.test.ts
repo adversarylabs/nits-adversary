@@ -35,6 +35,20 @@ test("matching operation and immediate verification wording stay quiet", async (
   }
 });
 
+test("operation words inside the affected resource stay quiet", async () => {
+  for (const [operation, message] of [
+    ["delete", "Failed to delete login session."],
+    ["disable", "Unable to disable the login challenge."],
+  ]) {
+    const result = await changedFinding(
+      `pages/api/two-factor/${operation}.ts`,
+      'console.error("old diagnostic");\n',
+      `console.error("${message}");\n`,
+    );
+    assert.equal(result.findings.some((item) => item.ruleId === "nits.diagnostic_operation_mismatch"), false);
+  }
+});
+
 test("ordinary files do not infer an operation from diagnostic text alone", async () => {
   const result = await changedFinding(
     "src/auth.ts",
